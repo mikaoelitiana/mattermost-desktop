@@ -7,53 +7,94 @@ var webpack = require('webpack-stream');
 var named = require('vinyl-named');
 var changed = require('gulp-changed');
 var esformatter = require('gulp-esformatter');
+var esformatter_origin = require('esformatter');
+var through = require('through2');
 var del = require('del');
 var electron = require('electron-connect').server.create({
   path: './dist'
 });
 var packager = require('electron-packager');
+const fs = require('fs');
 
-var sources = ['**/*.js', '**/*.css', '**/*.html', '!**/node_modules/**', '!dist/**', '!release/**'];
+const distPackageAuthor = 'Mattermost, Inc.'
+
+var sources = ['**/*.js', '**/*.json', '**/*.css', '**/*.html', '!**/node_modules/**', '!dist/**', '!release/**', '!**/test_config.json'];
 
 gulp.task('prettify', ['prettify:sources', 'prettify:jsx']);
+gulp.task('prettify:verify', ['prettify:sources:verify', 'prettify:jsx:verify'])
+
+var prettify_options = {
+  html: {
+    eol: '\n',
+    indentSize: 2
+  },
+  css: {
+    eol: '\n',
+    indentSize: 2
+  },
+  js: {
+    eol: '\n',
+    indentSize: 2,
+    braceStyle: "end-expand"
+  }
+};
 
 gulp.task('prettify:sources', ['sync-meta'], function() {
+  prettify_options.mode = "VERIFY_AND_WRITE";
   return gulp.src(sources)
-    .pipe(prettify({
-      html: {
-        indentSize: 2
-      },
-      css: {
-        indentSize: 2
-      },
-      js: {
-        indentSize: 2,
-        braceStyle: "end-expand"
-      }
-    }))
+    .pipe(prettify(prettify_options))
     .pipe(gulp.dest('.'));
 });
 
+gulp.task('prettify:sources:verify', function() {
+  prettify_options.mode = "VERIFY_ONLY";
+  prettify_options.showDiff = false;
+  return gulp.src(sources)
+    .pipe(prettify(prettify_options));
+});
+
+
+var esformatter_jsx_options = {
+  indent: {
+    value: '  '
+  },
+  plugins: ['esformatter-jsx']
+};
+
 gulp.task('prettify:jsx', function() {
   return gulp.src('src/browser/**/*.jsx')
-    .pipe(esformatter({
-      indent: {
-        value: '  '
-      },
-      plugins: ['esformatter-jsx']
-    }))
+    .pipe(esformatter(esformatter_jsx_options))
     .pipe(gulp.dest('src/browser'));
 });
 
-gulp.task('build', ['sync-meta', 'webpack', 'copy'], function() {
-  return gulp.src('src/package.json')
-    .pipe(gulp.dest('dist'));
+gulp.task('prettify:jsx:verify', function() {
+  return gulp.src('src/browser/**/*.jsx')
+    .pipe(through.obj(function(file, enc, cb) {
+      var result = esformatter_origin.diff.unified(file.contents.toString(), esformatter_origin.rc(file.path, esformatter_jsx_options));
+      if (result !== "") {
+        console.log('Error: ' + file.path + ' must be formatted');
+        process.exit(1);
+      }
+      cb();
+    }));
+});
+
+
+gulp.task('build', ['sync-meta', 'webpack', 'copy'], function(cb) {
+  const appPackageJson = require('./src/package.json');
+  const distPackageJson = Object.assign({}, appPackageJson, {
+    author: {
+      name: distPackageAuthor,
+      email: 'noreply'
+    }
+  });
+  fs.writeFile('./dist/package.json', JSON.stringify(distPackageJson, null, '  '), cb);
 });
 
 gulp.task('webpack', ['webpack:main', 'webpack:browser', 'webpack:webview']);
 
 gulp.task('webpack:browser', function() {
-  return gulp.src('src/browser/**/*.jsx')
+  return gulp.src('src/browser/*.jsx')
     .pipe(named())
     .pipe(webpack({
       module: {
@@ -75,7 +116,7 @@ gulp.task('webpack:browser', function() {
         __filename: false,
         __dirname: false
       },
-      target: 'electron'
+      target: 'electron-renderer'
     }))
     .pipe(gulp.dest('dist/browser/'));
 });
@@ -96,7 +137,10 @@ gulp.task('webpack:main', function() {
         __filename: false,
         __dirname: false
       },
-      target: 'electron'
+      target: 'electron-main',
+      externals: {
+        remote: true // for electron-connect
+      }
     }))
     .pipe(gulp.dest('dist/'));
 });
@@ -148,7 +192,6 @@ function makePackage(platform, arch, callback) {
   var packageJson = require('./src/package.json');
   packager({
     dir: './dist',
-    name: packageJson.name,
     platform: platform,
     arch: arch,
     version: require('./package.json').devDependencies['electron-prebuilt'],
@@ -156,14 +199,14 @@ function makePackage(platform, arch, callback) {
     prune: true,
     overwrite: true,
     "app-version": packageJson.version,
-    icon: 'resources/electron-mattermost',
+    icon: 'resources/icon',
     "version-string": {
-      CompanyName: packageJson.author,
-      LegalCopyright: 'Copyright (c) 2015 ' + packageJson.author,
-      FileDescription: packageJson.name,
-      OriginalFilename: packageJson.name + '.exe',
+      CompanyName: distPackageAuthor,
+      LegalCopyright: `Copyright (c) 2015 - ${new Date().getFullYear()} ${packageJson.author.name}`,
+      FileDescription: packageJson.productName,
+      OriginalFilename: packageJson.productName + '.exe',
       ProductVersion: packageJson.version,
-      ProductName: packageJson.name,
+      ProductName: packageJson.productName,
       InternalName: packageJson.name
     }
   }, function(err, appPath) {
@@ -200,10 +243,10 @@ gulp.task('sync-meta', function() {
   var appPackageJson = require('./src/package.json');
   var packageJson = require('./package.json');
   appPackageJson.name = packageJson.name;
+  appPackageJson.productName = packageJson.productName;
   appPackageJson.version = packageJson.version;
   appPackageJson.description = packageJson.description;
   appPackageJson.author = packageJson.author;
   appPackageJson.license = packageJson.license;
-  var fs = require('fs');
   fs.writeFileSync('./src/package.json', JSON.stringify(appPackageJson, null, '  ') + '\n');
 });
